@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+# resultados_tse.sh
+# Consulta os resultados oficiais do TSE por cargo e município e exibe
+# os candidatos mais votados em formato de tabela no terminal.
+#
+# Uso:
+#   ./resultados_tse.sh            # usa os valores padrão
+#   ./resultados_tse.sh --help     # mostra a ajuda
+#
+# Variáveis de ambiente (opcionais):
+#   TSE_RESULTS_UF, TSE_RESULTS_MUNICIPALITY, TSE_RESULTS_YEAR,
+#   TSE_RESULTS_LIMIT, TSE_RESULTS_COLOR (auto|always|never), entre outras.
 set -Eeuo pipefail
 
 readonly DEFAULT_BASE_URL="https://resultados.tse.jus.br/oficial"
@@ -8,10 +19,31 @@ BASE_URL="${TSE_RESULTS_BASE_URL:-$DEFAULT_BASE_URL}"
 YEAR="${TSE_RESULTS_YEAR:-2026}"
 UF="${TSE_RESULTS_UF:-ma}"
 MUNICIPIO="${TSE_RESULTS_MUNICIPALITY:-07242}"
-LIMIT="${TSE_RESULTS_LIMIT:-20}"
+LIMIT="${TSE_RESULTS_LIMIT:-10}"
 FEDERAL_ELECTION="${TSE_RESULTS_FEDERAL_ELECTION:-6257}"
 STATE_ELECTION="${TSE_RESULTS_STATE_ELECTION:-6259}"
 COLOR_MODE="${TSE_RESULTS_COLOR:-auto}"
+
+usage() {
+  cat <<EOF
+Uso: ${0##*/} [-h|--help]
+
+Exibe os candidatos mais votados por cargo para um município.
+
+Variáveis de ambiente (valor atual entre parênteses):
+  TSE_RESULTS_UF            sigla do estado ($UF)
+  TSE_RESULTS_MUNICIPALITY  código do município, 5 dígitos ($MUNICIPIO)
+  TSE_RESULTS_YEAR          ano da eleição ($YEAR)
+  TSE_RESULTS_LIMIT         máximo de candidatos por cargo ($LIMIT)
+  TSE_RESULTS_COLOR         auto, always ou never ($COLOR_MODE)
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) printf 'Opção desconhecida: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
+esac
 
 die() { printf 'Erro: %s\n' "$*" >&2; exit 1; }
 command -v curl >/dev/null || die "curl não encontrado"
@@ -34,37 +66,38 @@ if [[ "$COLOR_MODE" == always ]] || { [[ "$COLOR_MODE" == auto && -t 1 && "${TER
 fi
 
 print_rule() {
-  local name_width="$1" number_width="$2" votes_width="$3"
-  printf '+-%*s-+-%*s-+-%*s-+\n' "$name_width" '' "$number_width" '' "$votes_width" '' | tr ' ' '-'
+  local pos_width="$1" name_width="$2" number_width="$3" votes_width="$4"
+  printf '+-%*s-+-%*s-+-%*s-+-%*s-+\n' "$pos_width" '' "$name_width" '' "$number_width" '' "$votes_width" '' | tr ' ' '-'
 }
 
 print_table() {
   local -n table_rows="$1"
-  local name_width=${#name_header} number_width=${#number_header} votes_width=${#votes_header}
-  local row name number votes
+  local pos_width=${#pos_header} name_width=${#name_header} number_width=${#number_header} votes_width=${#votes_header}
+  local row pos name number votes
 
   for row in "${table_rows[@]}"; do
-    IFS=$'\t' read -r name number votes <<<"$row"
+    IFS=$'\t' read -r pos name number votes <<<"$row"
+    (( ${#pos} > pos_width )) && pos_width=${#pos}
     (( ${#name} > name_width )) && name_width=${#name}
     (( ${#number} > number_width )) && number_width=${#number}
     (( ${#votes} > votes_width )) && votes_width=${#votes}
   done
 
-  print_rule "$name_width" "$number_width" "$votes_width"
-  printf '| %-*s | %*s | %*s |\n' "$name_width" "$name_header" "$number_width" "$number_header" "$votes_width" "$votes_header"
-  print_rule "$name_width" "$number_width" "$votes_width"
+  print_rule "$pos_width" "$name_width" "$number_width" "$votes_width"
+  printf '| %*s | %-*s | %*s | %*s |\n' "$pos_width" "$pos_header" "$name_width" "$name_header" "$number_width" "$number_header" "$votes_width" "$votes_header"
+  print_rule "$pos_width" "$name_width" "$number_width" "$votes_width"
   for row in "${table_rows[@]}"; do
-    IFS=$'\t' read -r name number votes <<<"$row"
+    IFS=$'\t' read -r pos name number votes <<<"$row"
     if $use_color; then
-      printf '| \033[36m%-*s\033[0m | %*s | \033[32m%*s\033[0m |\n' "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
+      printf '| %*s | \033[36m%-*s\033[0m | %*s | \033[32m%*s\033[0m |\n' "$pos_width" "$pos" "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
     else
-      printf '| %-*s | %*s | %*s |\n' "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
+      printf '| %*s | %-*s | %*s | %*s |\n' "$pos_width" "$pos" "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
     fi
   done
-  print_rule "$name_width" "$number_width" "$votes_width"
+  print_rule "$pos_width" "$name_width" "$number_width" "$votes_width"
 }
 
-readonly name_header="NOME" number_header="NÚMERO" votes_header="VOTOS"
+readonly pos_header="POS" name_header="NOME" number_header="NÚMERO" votes_header="VOTOS"
 
 election_for_cargo() {
   case "$1" in
@@ -99,8 +132,9 @@ for cargo in "${CARGOS[@]}"; do
     ]
     | unique_by(.numero)
     | sort_by([-.votos, (.nome | ascii_downcase), .numero])
-    | .[:$limit][]
-    | [.nome, .numero, (.votos | tostring)] | @tsv
+    | .[:$limit]
+    | to_entries[]
+    | [(.key + 1 | tostring), .value.nome, .value.numero, (.value.votos | tostring)] | @tsv
   ' "$file" >"$rows_file"
   mapfile -t rows <"$rows_file"
   print_table rows
